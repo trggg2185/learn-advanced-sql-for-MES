@@ -6,6 +6,11 @@ select * from machines; -- máy móc
 select * from employees; -- nhân viên
 select * from work_orders; -- lệnh sản xuất
 select * from production_logs; -- nhật ký sản xuất
+select * from materials; -- Danh mục nguyên vật liệu để làm ra sản phẩm
+select * from work_order_materials; -- Số lượng vật tư dự kiến của từng lệnh
+select * from material_stocks; -- Số lượng tồn kho hiện tại
+select * from stock_movements; -- Nhật ký nhập, xuất, điều chỉnh tồn kho
+select * from machine_status_history; -- Lịch sử thay đổi trạng thái máy
 
 -- Thứ tự thực hiện các lệnh sql:
 -- 1 FROM / JOIN: Xác định bảng nguồn và kết hợp dữ liệu
@@ -16,6 +21,138 @@ select * from production_logs; -- nhật ký sản xuất
 -- 6 DISTINCT: Loại bỏ dòng trùng
 -- 7 ORDER BY: Sắp xếp kết quả
 -- 8 LIMIT / OFFSET: Giới hạn số dòng trả về
+
+select 
+	wo.order_code,
+    m.code as material_code,
+    m.name as material_name,
+    wom.required_quantity,
+    m.unit as material_unit
+from work_order_materials wom
+join work_orders wo on wo.id = wom.work_order_id
+join materials m on m.id = wom.material_id;
+
+-- Window Functions cho phép thực hiện các phép tính trên một tập dòng liên quan mà không nhất thiết gom nhiều dòng thành một dòng như GROUP BY.
+-- GROUP BY làm giảm số dòng, trong khi Window Function vẫn giữ các dòng chi tiết và bổ sung kết quả tính toán.
+-- FUNCTION() OVER (
+--     PARTITION BY column
+--     ORDER BY column
+--     ROWS BETWEEN ...)
+-- over(): xđ đây là window function
+-- partition by: chia dữ liệu thành các nhóm tính toán
+-- order by: xđ thứ tự các rows trong các nhóm tính toán
+-- rows between: xđ khung các dòng dùng để tính toán
+
+SELECT -- đây khi dùng group by sẽ làm giảm số dòng
+    machine_id,
+    SUM(good_quantity) AS total_good
+FROM production_logs
+GROUP BY machine_id;
+
+SELECT -- đây là dùng window function vẫn giữ được các dòng chi tiết và bổ sung thêm cột tính toán
+    id,
+    machine_id,
+    good_quantity,
+    SUM(good_quantity) OVER (
+        PARTITION BY machine_id
+    ) AS total_good
+FROM production_logs
+WHERE machine_id = 1;
+
+-- tìm bản ghi sản xuất log mới nhất của mỗi máy
+with ranked_logs as (
+	SELECT
+		machine_id,
+		id AS log_id,
+		produced_at,
+		ROW_NUMBER() OVER ( -- hàm row_number giúp đánh số thứ tự liên tiếp cho từng dòng dữ liệu trong 1 tập kết quả
+			PARTITION BY machine_id -- gom nhóm theo id máy
+			ORDER BY produced_at DESC, id DESC -- sắp xếp theo tg mới nhất, nếu 2 bản ghi cùng produced_at thì id sẽ quyết định thứ tự
+		) AS rn
+	FROM production_logs -- ko thể dùng trực tiếp where nếu muốn lấy bản mới nhất mỗi máy bởi window func được chạy sau where nên ta phải dùng CTE
+)
+select * from ranked_logs where rn = 1; -- lấy ra bản ghi mới nhất của mỗi máy
+
+-- ROW_NUMBER: Mỗi dòng nhận một số thứ tự riêng.
+-- RANK: Các dòng đồng hạng nhận cùng thứ hạng, tạo khoảng trống thứ hạng tiếp theo.
+-- DENSE_RANK: Các dòng đồng hạng nhận cùng thứ hạng, không tạo khoảng trống.
+
+-- xếp hạng các máy dựa trên tổng sản lượng đã sx được
+WITH machine_summary AS (
+    SELECT
+        m.id,
+        m.code,
+        COALESCE(SUM(log.good_quantity), 0)
+            AS total_good
+    FROM machines m
+    LEFT JOIN production_logs log
+        ON m.id = log.machine_id
+    GROUP BY m.id, m.code
+)
+SELECT
+    code,
+    total_good,
+    RANK() OVER (
+        ORDER BY total_good DESC
+    ) AS production_rank,
+    DENSE_RANK() OVER (
+        ORDER BY total_good DESC
+    ) AS densee_rank
+FROM machine_summary;
+
+-- tính tổng luỹ kế qua mỗi ngày của từng máy
+-- ví dụ ngày thứ 1 máy 1 đc 100 thì tổng tích luỹ là 100, ngày thứ 2 là 500 thì tổng tích luỹ bằng 100 + 500 = 600
+with daily_production as (
+	-- đầu tiên select tổng sản phầm trong 1 ngày của từng máy
+	select machine_id, date(produced_at) as production_date, sum(good_quantity) as daily_good
+	from production_logs
+	group by machine_id, date(produced_at) -- gom nhóm cùng 1 máy và cùng 1 ngày để tính
+)
+select
+	machine_id,
+    daily_good,
+    production_date,
+    sum(daily_good) over(
+		partition by machine_id -- gom nhóm theo id máy
+        order by production_date -- sx theo ngày sản suất
+        rows between -- xđ khung tính toán theo vị trí dòng
+			unbounded preceding -- từ dòng đầu tiên trong nhóm tính toán 
+            and current row -- đến dòng hiện tại trong nhóm tính toán 
+		-- ví dụ trong nhóm máy 1, đang duyệt đến dòng 1 thì tổng luỹ kế tính từ dòng 1 đến dòng hiện tại là dòng 1
+        -- duyệt đến dòng 2 thì tổng luỹ kế cộng tử dòng 1 đến dòng hiện tại là 2
+    ) as cumulative_good
+from daily_production
+order by machine_id, production_date;
+
+-- LAG và LEAD: Hai hàm này dùng để lấy giá trị của dòng trước hoặc dòng sau trong một phân vùng có thứ tự.
+-- LAG(column): Lấy giá trị từ dòng trước.
+-- LEAD(column): Lấy giá trị từ dòng sau.
+
+-- Xem thời gian giữa hai lần ghi nhận sản lượng liên tiếp của cùng một máy.
+WITH log_times AS (
+    SELECT
+        machine_id,
+        produced_at,
+        LAG(produced_at) OVER ( -- tạo 1 cột lấy thời gian của row trước trong nhóm tính toán, nếu là bản ghi đầu tiên thì cột này null
+            PARTITION BY machine_id
+            ORDER BY produced_at, id
+        ) AS previous_time
+    FROM production_logs
+)
+SELECT
+    machine_id,
+    produced_at,
+    previous_time,
+    TIMESTAMPDIFF(
+        MINUTE,
+        previous_time,
+        produced_at
+    ) AS minutes_since_previous_log
+FROM log_times
+ORDER BY machine_id, produced_at;
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
 
 -- 3 lệnh sản xuất có số lượng kế hoạch lớn nhất chưa bị huỷ
 select order_code, product_id, planned_quantity, status
@@ -194,7 +331,7 @@ select order_code, total_good from order_summary
 where total_good < (select avg(total_good) from order_summary)
 order by total_good desc;
 
--- Tạo báo cáo từng lệnh sản xuất gồm order_code, product_name, planned_quantity, total_good, total_defect và completion_rate (%)
+-- Bài 11: Tạo báo cáo từng lệnh sản xuất gồm order_code, product_name, planned_quantity, total_good, total_defect và completion_rate (%)
 -- Phải hiển thị cả lệnh chưa có log, không được tính sai planned_quantity.
 select
 	wo.order_code,
@@ -203,32 +340,39 @@ select
     coalesce(sum(plg.good_quantity), 0) as total_good,
     coalesce(sum(plg.defect_quantity), 0) as total_defect,
     round(
-		coalesce(sum(plg.good_quantity), 0) * 100 / wo.planned_quantity,
+		coalesce(sum(plg.good_quantity), 0) * 100 / nullif(wo.planned_quantity, 0),
         2
     ) as completion_rate
 from work_orders wo
-left join products p on p.id = wo.product_id
+join products p on p.id = wo.product_id
 left join production_logs plg on plg.work_order_id = wo.id
 group by wo.id, wo.order_code, wo.planned_quantity
 order by completion_rate desc;
 
--- Tìm các máy có tỷ lệ sản phẩm lỗi lớn hơn 3%, chỉ xét máy đã ghi nhận ít nhất một sản phẩm.
+-- Bài 12: Tìm các máy có tỷ lệ sản phẩm lỗi lớn hơn 3%, chỉ xét máy đã ghi nhận ít nhất một sản phẩm.
 -- Hiển thị machine_code, total_good, total_defect, defect_rate.
 select m.code, sum(plg.good_quantity) as total_good, sum(plg.defect_quantity) as total_defect,
-	round(
-		sum(plg.defect_quantity) * 100 /
-        nullif(
+	sum(
+		plg.defect_quantity) * 100 /
+		nullif(
 			sum(plg.good_quantity) + sum(plg.defect_quantity),
             0
-        ),
-        2
-    ) as defect_rate
+	) as defect_rate
 from machines m
 join production_logs plg on plg.machine_id = m.id
 group by m.id, m.code
 having defect_rate > 3
 order by defect_rate desc;
 
--- Tìm những sản phẩm chưa có lệnh sản xuất COMPLETED, đồng thời hiển thị tổng số lượng kế hoạch của những lệnh chưa bị hủy.
+-- Bài 13: Tìm những sản phẩm chưa có lệnh sản xuất COMPLETED, đồng thời hiển thị tổng số lượng kế hoạch của những lệnh chưa bị hủy.
 -- Phải hiển thị cả sản phẩm chưa có lệnh nào, nếu có.
-
+with planned_summary as (
+	select product_id, sum(planned_quantity) as total_planned
+    from work_orders
+    where status != 'CANCELLED'
+    group by product_id
+)
+select p.name as product_name, coalesce(ps.total_planned, 0) as total_planned from products p
+left join planned_summary ps on ps.product_id = p.id
+where not exists (select 1 from work_orders wo where wo.product_id = p.id and wo.status = 'COMPLETED')
+order by total_planned desc;

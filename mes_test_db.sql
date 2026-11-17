@@ -60,6 +60,63 @@ CREATE TABLE production_logs (
  FOREIGN KEY (employee_id) REFERENCES employees(id)
 );
 
+-- Materials: master data
+CREATE TABLE IF NOT EXISTS materials (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    code VARCHAR(30) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    unit VARCHAR(10) NOT NULL,
+    CONSTRAINT chk_material_unit CHECK (unit IN ('PCS', 'KG', 'M')) -- pcs là cái, kilogam và mét
+) ENGINE = InnoDB;
+
+-- Planned material quantity per work order (N:M)
+CREATE TABLE IF NOT EXISTS work_order_materials (
+    work_order_id INT NOT NULL,
+    material_id BIGINT NOT NULL,
+    required_quantity DECIMAL(14, 3) NOT NULL,
+    PRIMARY KEY (work_order_id, material_id),
+    CONSTRAINT fk_wom_work_order FOREIGN KEY (work_order_id)
+        REFERENCES work_orders(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_wom_material FOREIGN KEY (material_id)
+        REFERENCES materials(id) ON DELETE RESTRICT,
+    CONSTRAINT chk_wom_required_quantity CHECK (required_quantity > 0)
+) ENGINE = InnoDB;
+
+-- Demonstration stock balance; assumes a single aggregated stock location.
+CREATE TABLE IF NOT EXISTS material_stocks (
+    material_id BIGINT PRIMARY KEY,
+    available_qty DECIMAL(14, 3) NOT NULL DEFAULT 0,
+    CONSTRAINT fk_stock_material FOREIGN KEY (material_id)
+        REFERENCES materials(id) ON DELETE RESTRICT,
+    CONSTRAINT chk_stock_non_negative CHECK (available_qty >= 0)
+) ENGINE = InnoDB;
+
+-- Signed movement ledger; negative means stock out/consumption.
+CREATE TABLE IF NOT EXISTS stock_movements (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    material_id BIGINT NOT NULL,
+    work_order_id INT NULL,
+    delta_quantity DECIMAL(14, 3) NOT NULL,
+    reason ENUM('RECEIVE', 'CONSUME', 'ADJUST') NOT NULL,
+    occurred_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    CONSTRAINT fk_mov_material FOREIGN KEY (material_id)
+        REFERENCES materials(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_mov_work_order FOREIGN KEY (work_order_id)
+        REFERENCES work_orders(id) ON DELETE RESTRICT,
+    CONSTRAINT chk_nonzero_movement CHECK (delta_quantity <> 0)
+) ENGINE = InnoDB;
+
+-- Demonstration audit table for a later trigger exercise.
+CREATE TABLE IF NOT EXISTS machine_status_history (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    machine_id INT NOT NULL,
+    old_status VARCHAR(20) NOT NULL,
+    new_status VARCHAR(20) NOT NULL,
+    changed_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    CONSTRAINT fk_status_history_machine FOREIGN KEY (machine_id)
+        REFERENCES machines(id) ON DELETE RESTRICT
+) ENGINE = InnoDB;
+
 INSERT INTO production_lines (id,name,location) VALUES
 (1,'Assembly A','Factory 1'),(2,'Assembly B','Factory 1'),(3,'Packaging C','Factory 2'),(4,'Testing D','Factory 2');
 INSERT INTO products (id,sku,name,standard_cycle_seconds) VALUES
@@ -94,3 +151,23 @@ INSERT INTO production_logs (id,work_order_id,machine_id,employee_id,produced_at
 (8,4,2,2,'2026-10-06 08:30:00',300,10),
 (9,8,3,3,'2026-10-11 11:00:00',150,5),
 (10,8,3,NULL,'2026-10-12 11:00:00',100,0);
+
+INSERT INTO materials (id, code, name, unit) VALUES
+    (1, 'MAT-001', 'Copper Wire', 'KG'),
+    (2, 'MAT-002', 'Screw M3', 'PCS'),
+    (3, 'MAT-003', 'Solder Paste', 'KG')
+ON DUPLICATE KEY UPDATE id = id;
+
+INSERT INTO work_order_materials (work_order_id, material_id, required_quantity) VALUES
+    (1, 1, 2.500),
+    (1, 2, 80.000),
+    (2, 1, 1.750),
+    (2, 3, 0.850),
+    (3, 2, 60.000)
+ON DUPLICATE KEY UPDATE required_quantity = required_quantity;
+
+INSERT INTO material_stocks (material_id, available_qty) VALUES
+    (1, 100.000),
+    (2, 500.000),
+    (3, 20.000)
+ON DUPLICATE KEY UPDATE available_qty = available_qty;
